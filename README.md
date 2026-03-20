@@ -91,7 +91,7 @@ git clone https://github.com/YOUR_USERNAME/runner-watchdog.git
 cd runner-watchdog
 
 cp .env.example .env
-# Edit .env → add your GITHUB_TOKEN and REPO_URL
+# Edit .env → add your GITHUB_TOKEN, REPO_URL, WATCHDOG_API_KEY, and REDIS_PASSWORD
 ```
 
 ### 2. Build the Runner Image
@@ -111,41 +111,44 @@ docker compose up --build
 
 This starts:
 
-| Service        | Port   | Purpose                                    |
-| -------------- | ------ | ------------------------------------------ |
-| **Redis**      | `6379` | Runner metadata registry                   |
-| **Controller** | `8000` | REST API + background watchdog loop        |
+| Service            | Port   | Purpose                                    |
+| ------------------ | ------ | ------------------------------------------ |
+| **Redis**          | —      | Runner metadata registry (internal only)   |
+| **Docker Proxy**   | —      | Scoped Docker socket proxy (internal only) |
+| **Controller**     | `8000` | REST API + background watchdog loop        |
 
 ### 4. Verify
 
 ```bash
-# Health check
+# Health check (no auth required)
 curl http://localhost:8000/health
 # → {"status": "ok"}
 
-# Check latest runner version
-curl http://localhost:8000/version/latest
+# Check latest runner version (requires API key)
+curl -H "X-API-Key: YOUR_API_KEY" http://localhost:8000/version/latest
 # → {"latest_version": "2.329.0"}
 
-# Fleet status overview
-curl http://localhost:8000/status
+# Fleet status overview (requires API key)
+curl -H "X-API-Key: YOUR_API_KEY" http://localhost:8000/status
 ```
 
 ---
 
 ## 📡 API Reference
 
-Runner Watchdog exposes a REST API for fleet inspection and manual control:
+Runner Watchdog exposes a REST API for fleet inspection and manual control.
 
-| Method | Endpoint           | Description                              |
-| ------ | ------------------ | ---------------------------------------- |
-| `GET`  | `/health`          | Liveness probe                           |
-| `GET`  | `/runners`         | List all runners from local registry     |
-| `GET`  | `/runners/github`  | List runners registered on GitHub        |
-| `GET`  | `/version/latest`  | Fetch latest runner version from GitHub  |
-| `GET`  | `/status`          | Fleet summary — version distribution, upgrade availability |
-| `POST` | `/check-update`    | Trigger a manual version check           |
-| `POST` | `/trigger-update`  | Trigger a manual rolling update          |
+All endpoints except `/health` require an `X-API-Key` header.
+
+| Method | Endpoint           | Auth | Description                              |
+| ------ | ------------------ | ---- | ---------------------------------------- |
+| `GET`  | `/health`          | No   | Liveness probe                           |
+| `GET`  | `/runners`         | Yes  | List all runners from local registry     |
+| `GET`  | `/runners/github`  | Yes  | List runners registered on GitHub        |
+| `GET`  | `/version/latest`  | Yes  | Fetch latest runner version from GitHub  |
+| `GET`  | `/status`          | Yes  | Fleet summary — version distribution, upgrade availability |
+| `POST` | `/check-update`    | Yes  | Trigger a manual version check           |
+| `POST` | `/trigger-update`  | Yes  | Trigger a manual rolling update          |
 
 **Example — fleet status:**
 
@@ -172,8 +175,10 @@ All settings via environment variables (`.env` file):
 | ------------------------ | -------------------- | ---------------------------------------- |
 | `GITHUB_TOKEN`           | *required*           | GitHub PAT (`repo`, `workflow`, `admin:org`) |
 | `REPO_URL`               | *required*           | Target repository for runner registration |
+| `WATCHDOG_API_KEY`       | *required*           | API key for authenticating API requests   |
 | `REDIS_HOST`             | `redis`              | Redis hostname                           |
 | `REDIS_PORT`             | `6379`               | Redis port                               |
+| `REDIS_PASSWORD`         | `changeme`           | Redis authentication password            |
 | `RUNNER_VERSION`         | `2.329.0`            | Current baseline runner version          |
 | `RUNNER_IMAGE_NAME`      | `github-runner-image`| Docker image name for runners            |
 | `UPDATE_BATCH_PERCENT`   | `10`                 | % of fleet to replace per rolling cycle  |
@@ -210,10 +215,13 @@ runner-watchdog/
 
 ## 🔐 Security
 
-- Runner containers execute as a **non-root user**
-- Runner tokens are **short-lived registration tokens** (not PATs)
-- Cleanup traps **automatically deregister** runners on shutdown — no ghost runners
-- Docker socket is mounted read-write; run the controller in a **trusted environment**
+- **API authentication** — All endpoints (except `/health`) require an `X-API-Key` header validated with constant-time comparison. Fails closed if the key isn't configured.
+- **Docker socket proxy** — The controller never touches the raw Docker socket. All Docker operations go through [Tecnativa/docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) which only permits container lifecycle operations (no exec, build, swarm, images, networks).
+- **Redis isolation** — Redis is not exposed externally and requires password authentication (`--requirepass`).
+- **Non-root containers** — Both the controller and runner containers run as non-root users.
+- **Short-lived tokens** — Runner registration uses ephemeral GitHub registration tokens, not long-lived PATs.
+- **Cleanup traps** — Runners automatically deregister from GitHub on shutdown — no ghost runners.
+- **Pinned dependencies** — All Python packages are pinned to exact versions to prevent supply-chain attacks.
 
 ---
 
